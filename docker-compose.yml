@@ -1,0 +1,106 @@
+services:
+  postgres:
+    image: postgres:15-bullseye
+    environment:
+      POSTGRES_PASSWORD: ory_admin
+      POSTGRES_USER: ory_admin
+      POSTGRES_DB: ory_admin
+    volumes:
+      - ./postgres/setup-database.sql://docker-entrypoint-initdb.d/setup-database.sql
+    healthcheck:
+      test: pg_isready -U ory_admin -d ory_admin
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+  
+  smtp:
+    image: oryd/mailslurper:latest-smtps
+    ports:
+      - '4436:4436'
+      - '4437:4437'
+
+  kratos_migrate:
+    image: oryd/kratos:v0.11.1
+    command: -c /etc/config/kratos/kratos.yaml migrate sql -e --yes
+    environment:
+      DSN: postgres://ory_kratos:ory_kratos@postgres:5432/ory_kratos?sslmode=disable
+    volumes:
+      - ./kratos:/etc/config/kratos
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  kratos:
+    image: oryd/kratos:v0.11.1
+    ports:
+      - '4433:4433' # public
+      - '4434:4434' # admin
+    command: serve -c /etc/config/kratos/kratos.yaml --dev --watch-courier
+    environment:
+      DSN: postgres://ory_kratos:ory_kratos@postgres:5432/ory_kratos?sslmode=disable
+      COURIER_SMTP_CONNECTION_URI: smtps://test:test@smtp:1025/?skip_ssl_verify=true
+      COURIER_SMTP_FROM_ADDRESS: kratos@localhost
+      COURIER_SMTP_FROM_NAME: Kratos from Ory
+    healthcheck:
+      test: wget -q http://kratos:4433/health/ready || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    volumes:
+      - ./kratos:/etc/config/kratos
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kratos_migrate:
+        condition: service_completed_successfully
+
+  kratos-selfservice-ui-node:
+    image: oryd/kratos-selfservice-ui-node:v0.11.1
+    ports:
+      - 4455:3000
+    environment:
+      - KRATOS_PUBLIC_URL=http://kratos:4433/
+      - KRATOS_BROWSER_URL=http://127.0.0.1:4433/
+
+  hydra_migrate:
+    image: oryd/hydra:v2.0.3
+    environment:
+      DSN: postgres://ory_hydra:ory_hydra@postgres:5432/ory_hydra?sslmode=disable
+    volumes:
+      - ./hydra:/etc/config/hydra
+    command: migrate -c /etc/config/hydra/hydra.yaml sql -e --yes
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  hydra:
+    image: oryd/hydra:v2.0.3
+    ports:
+      - "4444:4444" # Public port
+      - "4445:4445" # Admin port
+      - "5555:5555" # Port for hydra token user
+    volumes:
+      - ./hydra:/etc/config/hydra
+    command: serve -c /etc/config/hydra/hydra.yaml all --dev
+    environment:
+      DSN: postgres://ory_hydra:ory_hydra@postgres:5432/ory_hydra?sslmode=disable
+    healthcheck:
+      test: wget -q --spider http://hydra:4444/health/ready || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hydra_migrate:
+        condition: service_completed_successfully
+
+  consent:
+    image: oryd/hydra-login-consent-node:v2.0.3
+    ports:
+      - "3000:3000"
+    environment:
+      - HYDRA_ADMIN_URL=http://hydra:4445
